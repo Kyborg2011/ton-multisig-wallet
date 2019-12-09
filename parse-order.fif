@@ -1,0 +1,39 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base>" cr
+  ."Parse all information from previously serialized external messages <filename-base>.boc file:" cr
+  ."(especially its destination address and value) and the list of signatures." cr 1 halt
+} : usage
+$# 1 < ' usage if
+
+{ dup remaining abort"references in constructor tag"
+  tuck u@ -rot u@+ -rot <> abort"constructor tag mismatch"
+} : tag?
+
+$1 =: file-base
+file-base +".boc" file>B B>boc
+
+// parse an external message to a smart contract
+<s b{1000100} tag? 8 i@+ 256 u@+ Gram@+ swap drop b{00} tag? dict@+ 32 u@+ 32 u@+ 8 u@+ swap drop ref@
+."Seqno: " rot . cr
+."Valid until (unixtime): " swap . cr cr
+."Smart contract address: " cr
+3 roll 3 roll 2dup .addr cr
+."Non-bounceable: " 2dup 7 .Addr cr
+."Bounceable: " 6 .Addr cr cr
+
+// parse an output message
+<s b{01} tag? 1 i@+ swap drop b{000100} tag? 8 i@+ 256 u@+ Gram@
+."Amount: " .GR cr
+."Destination address: " cr
+2dup .addr cr
+."Non-bounceable: " 2dup 7 .Addr cr
+."Bounceable: " 6 .Addr cr cr
+
+// parse all signatures, that may be inside a dict
+."Signatures " cr
+."(<N> -> <SIG>) where <N> - id of a public/private keypair (like 'new-wallet<N>.pk'), <SIG> - signature:" cr
+0 box constant loop_index
+{ { @' loop_index @ . ." -> " csr. } { } cond } : show_signature
+{ dup @' loop_index @ swap 8 udict@ -1 = show_signature @' loop_index 1+! } 100 times

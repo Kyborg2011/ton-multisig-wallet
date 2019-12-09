@@ -1,0 +1,49 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <private-key-filename-base> <message-hex-filename-base> <seqno> <valid_until> <signatures-number> <pkid1> <pkid2> ... <pkidN>" cr
+  ."Create and sign a 'new order' external message corresponding to a partially signed order, "
+  ."recovered from the current state of the blockchain using one of the get-methods. <message-hex-filename-base>.fif - file, "
+  ."where you must store 'x{HEX_OF_MESSAGE_RETURNING_BY_GET_METHOD}'; <signatures-number> - number of signatures; "
+  ."<pkid1> <pkid2> ... <pkidN> - ids of private keys; a message will be saved into <filename-base>.boc file; "
+  ."<private-key-filename-base> - filebase of private keys file, like new-wallet1.pk." cr 1 halt
+} : usage
+$# 7 < ' usage if
+
+$1 =: file-base
+$2 =: private-key-filename-base
+$3 =: message-hex
+$4 parse-int =: seqno
+$5 parse-int =: valid_until
+$6 parse-int =: signatures_number
+
+// load needed private keys into tuple
+| box constant priv_keys
+0 box constant loop_index
+{ 7 @' loop_index @ + $() parse-int private-key-filename-base swap (.) $+ +".pk" load-generate-keypair
+  @' priv_keys @ swap , @' priv_keys ! drop @' loop_index 1+! } signatures_number times
+
+private-key-filename-base +".addr" load-address
+2dup 2constant wallet_addr
+cr ."Source wallet address = " 2dup .addr cr 6 .Addr cr cr
+
+// read x{MESSAGE_HEX} from a file + create a Cell from a Slice of a message body
+message-hex +".fif" include s>c
+// cut first 2 bytes of a cell, because it is service bytes
+<s 2 B@+ s>c
+// restore a full message for signing
+<b seqno 32 u, valid_until 32 u, 1 8 u, swap ref, b>
+
+// create all needed signatures
+dup ."signing message: " <s csr. cr
+dictnew box constant signatures
+0 box constant loop_index2
+{ dup hash @' priv_keys @ @' loop_index2 @ [] ed25519_sign_uint
+  <b swap B, 7 @' loop_index2 @ + $() parse-int 1- @' signatures @ 8 b>udict!
+  swap signatures ! drop @' loop_index2 1+! } signatures_number times
+
+<b b{1000100} s, wallet_addr addr, 0 Gram, b{00} s, signatures @ dict, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+file-base +".boc" tuck B>file
+."(Saved to file " type .")" cr

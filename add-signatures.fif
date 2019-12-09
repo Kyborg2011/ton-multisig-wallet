@@ -1,0 +1,46 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <private-key-filename-base> <signatures-number> <pkid1> <pkid2> ... <pkidN>" cr
+  ."To an external message from file <filename-base>.boc add new <signatures-number> signatures, "
+  ."generated using private keys, loaded from files like: <private-key-filename-base><pkid1>.pk, "
+  ."<private-key-filename-base><pkid2>.pk, ..., <private-key-filename-base><pkidN>.pk." cr 1 halt
+} : usage
+$# 4 < ' usage if
+
+{ dup remaining abort"references in constructor tag"
+  tuck u@ -rot u@+ -rot <> abort"constructor tag mismatch"
+} : tag?
+
+$1 =: file-base
+$2 =: private-key-filename-base
+$3 parse-int =: signatures_number
+
+// load needed private keys into tuple
+| box constant priv_keys
+0 box constant loop_index
+{ 4 @' loop_index @ + $() parse-int private-key-filename-base swap (.) $+ +".pk" load-generate-keypair
+  @' priv_keys @ swap , @' priv_keys ! drop @' loop_index 1+! } signatures_number times
+
+file-base +".boc" file>B B>boc
+// parse an external message to a smart contract
+<s b{1000100} tag? 8 i@+ 256 u@+ Gram@+ swap drop b{00} tag? dict@+ 32 u@+ 32 u@+ 8 u@+ ref@
+
+// load a signatures dict from message to a box constant
+4 roll box constant signatures
+
+// restore a full message for signing
+<b 4 roll 32 u, 3 roll 32 u, rot 8 u, swap ref, b>
+
+// create all needed signatures
+dup ."signing message: " <s csr. cr
+0 box constant loop_index2
+{ dup hash @' priv_keys @ @' loop_index2 @ [] ed25519_sign_uint
+  <b swap B, 4 @' loop_index2 @ + $() parse-int 1- @' signatures @ 8 b>udict!
+  swap signatures ! drop @' loop_index2 1+! } signatures_number times
+
+<b b{1000100} s, 3 roll 3 roll addr, 0 Gram, b{00} s, signatures @ dict, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+file-base +".boc" tuck B>file
+."(Saved to file " type .")" cr

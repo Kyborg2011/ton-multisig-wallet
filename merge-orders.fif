@@ -1,0 +1,43 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <filename-base-2> <result-filename>" cr
+  ."Merge two messages from files: <filename-base>.boc, <filename-base-2>.boc and write it into <result-filename>.boc" cr 1 halt
+} : usage
+$# 3 < ' usage if
+$# 3 > ' usage if
+
+{ dup remaining abort"references in constructor tag"
+  tuck u@ -rot u@+ -rot <> abort"constructor tag mismatch"
+} : tag?
+
+$1 =: file-base
+$2 =: filename-base-2
+$3 =: result-filename
+
+// parse an external message 1
+file-base +".boc" file>B B>boc
+<s b{1000100} tag? 8 i@+ 256 u@+ Gram@+ swap drop b{00} tag? dict@+ 32 u@+ 32 u@+ 8 u@+ ref@
+// load a signatures dict from message to a box constant
+4 roll box constant signatures
+{ 2drop } 3 times
+
+// parse an external message 2
+filename-base-2 +".boc" file>B B>boc
+<s b{1000100} tag? 8 i@+ 256 u@+ Gram@+ swap drop b{00} tag? dict@+ 32 u@+ 32 u@+ 8 u@+ ref@
+// load a signatures dict from message to a box constant
+4 roll box constant signatures2
+
+0 box constant loop_index
+{ { @' loop_index @ @' signatures @ 8 udict!
+  swap signatures ! drop } { } cond } : merge_signature
+{ @' signatures2 @ @' loop_index @ swap 8 udict@ -1 = merge_signature @' loop_index 1+! } 100 times
+
+// restore a full message
+<b 4 roll 32 u, 3 roll 32 u, rot 8 u, swap ref, b>
+
+<b b{1000100} s, 3 roll 3 roll addr, 0 Gram, b{00} s, signatures @ dict, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+result-filename +".boc" tuck B>file
+."(Saved to file " type .")" cr

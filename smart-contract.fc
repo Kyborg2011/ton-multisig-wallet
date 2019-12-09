@@ -1,0 +1,213 @@
+;; Multi-signature wallet smart contract
+
+(int, int, int, cell, cell) load_data() {
+    var cs = begin_parse(get_data());
+    var res = (cs~load_uint(32), cs~load_uint(8), cs~load_uint(8), cs~load_dict(), cs~load_dict());
+    cs.end_parse();
+    return res;
+}
+
+;; slice order -> signatures approved_signatures valid_until msg
+_ unpack_order(es) {
+    var res = (es~load_dict(), es~load_uint(8), es~load_uint(32), es~load_ref());
+    es.end_parse();
+    return res;
+}
+
+builder pack_order(signatures, approved_signatures, valid_until, msg) {
+    return begin_cell()
+        .store_dict(signatures)
+        .store_uint(approved_signatures, 8)
+        .store_uint(valid_until, 32)
+        .store_ref(msg);
+}
+
+_ parse_msg(msg) {
+    var msg_cs = msg.begin_parse();
+    msg_cs = msg_cs.skip_bits(9);
+    var res = (msg_cs~load_int(8), msg_cs~load_uint(256), msg_cs~load_grams());
+    return res;
+}
+
+(cell) collect_garbage(cell pending_orders) {
+    int i = -1;
+    do {
+        (i, var fs, var f) = pending_orders.udict_get_next?(32, i);
+        if (f) {
+            var (signatures, approved_signatures, valid_until, msg) = unpack_order(fs);
+            if (valid_until < now()) {
+                (pending_orders, var res) = pending_orders.idict_delete?(32, i);
+            }
+        }
+    } until (~ f);
+    return pending_orders;
+}
+
+() recv_internal(slice in_msg) impure {
+    ;; do nothing for internal messages
+}
+
+() recv_external(slice in_msg) impure {
+    int kl = 32;
+    var signatures_dict = in_msg~load_dict();
+    var cs = in_msg;
+    var msg_seqno = cs~load_uint(kl);
+    var valid_until = cs~load_uint(kl);
+    throw_if(35, valid_until < now());
+
+    ;; load all persistent data of a wallet
+    var (stored_seqno, n, k, public_keys, pending_orders) = load_data();
+    throw_unless(33, msg_seqno == stored_seqno);
+
+    accept_message();
+    cs~touch();
+
+    ;; garbage collector startup
+    pending_orders = collect_garbage(pending_orders);
+
+    ;; count all valid signatures
+    int approved_signatures = 0;
+    var msg_hash = slice_hash(in_msg);
+    var i = -1;
+    do {
+        (i, var fs, var f) = signatures_dict.udict_get_next?(8, i);
+        if (f) {
+            var signature = fs~load_bits(512);
+            fs.end_parse();
+            var (fs2, f2) = public_keys.udict_get?(8, i);
+            if (f2) {
+                var pkey = fs2~load_uint(256);
+                fs2.end_parse();
+                if (check_signature(msg_hash, signature, pkey)) {
+                    approved_signatures += 1;
+                    ;; after successful test of a signature, there is no reason to store the whole 512-bit sig,
+                    ;; so for economy of persistent storage we change value in dict to 0
+                    (signatures_dict, var replace_res) = signatures_dict.udict_replace_builder?(8, i,
+                        begin_cell().store_uint(0, 1));
+                } else {
+                    (signatures_dict, var res) = signatures_dict.idict_delete?(8, i);
+                }
+            }
+        }
+    } until (~ f);
+
+    ;; if there is a reference with message to send
+    if (cs.slice_refs()) {
+        var (mode, msg) = (cs~load_uint(8), cs~load_ref());
+
+        ;; try to find current message in pending orders list
+        var pending_order_id = 0;
+        i = -1;
+        do {
+            (i, var fs, var f) = pending_orders.udict_get_next?(kl, i);
+            if (f) {
+                var (old_signatures, old_approved_signatures, old_valid_until, old_msg) = unpack_order(fs);
+                if (slice_hash(old_msg.begin_parse()) == slice_hash(msg.begin_parse())) {
+                    pending_order_id = i;
+                }
+            }
+        } until(~ f);
+
+        if (pending_order_id != 0) {
+            (var fs, var f) = pending_orders.udict_get?(kl, pending_order_id);
+            if (f) {
+                var old_signatures = fs.preload_dict();
+                i = -1;
+                do {
+                    (i, var fs2, var f2) = old_signatures.udict_get_next?(8, i);
+                    if (f2) {
+                        (var fs3, var f3) = signatures_dict.udict_get?(8, i);
+                        ifnot (f3) {
+                            approved_signatures += 1;
+                            (signatures_dict, var add_res) = signatures_dict.udict_add_builder?(8, i,
+                                begin_cell().store_uint(0, 1));
+                        }
+                    }
+                } until(~ f2);
+
+                ;; accumulation of signatures: if any new signatures arrived, but it's still < k,
+                ;; then change a pending order object (add new signatures)
+                if (approved_signatures < k) {
+                    var new_order = pack_order(signatures_dict, approved_signatures, valid_until, msg);
+                    (pending_orders, var replace_res) = pending_orders.udict_replace_builder?(kl, pending_order_id, new_order);
+                } else {
+                    (pending_orders, var res) = pending_orders.idict_delete?(kl, pending_order_id);
+                }
+            }
+        }
+
+        if (approved_signatures < k) {
+            if ((pending_order_id == 0) & (approved_signatures > 0)) {
+                var new_order = pack_order(signatures_dict, approved_signatures, valid_until, msg);
+                (pending_orders, var add_res) = pending_orders.udict_add_builder?(kl, stored_seqno, new_order);
+            }
+        } else {
+            ;; if everything ok, process a message further
+            send_raw_message(msg, mode);
+        }
+    }
+
+    cs.end_parse();
+    set_data(begin_cell()
+        .store_uint(stored_seqno + 1, kl)
+        .store_uint(n, 8)
+        .store_uint(k, 8)
+        .store_dict(public_keys)
+        .store_dict(pending_orders).end_cell());
+}
+
+;; Get methods
+
+int seqno() method_id {
+    return get_data().begin_parse().preload_uint(32);
+}
+
+_ orders() method_id {
+    var (stored_seqno, n, k, public_keys, pending_orders) = load_data();
+    var l = nil;
+    var id = -1;
+    do {
+        (id, var fs, var f) = pending_orders.udict_get_next?(32, id);
+        if (f) {
+            var (signatures, approved_signatures, valid_until, msg) = unpack_order(fs);
+            var (wc, addr, amount) = parse_msg(msg);
+            l = cons(
+                tuple4(
+                    msg.begin_parse(),
+                    approved_signatures,
+                    pair(wc, addr),
+                    amount
+                ), l
+            );
+        }
+    } until (~ f);
+    return l;
+}
+
+;; if direction == -1, then method return orders, signed by a key_id
+;; if direction == 0, then method return orders, NOT signed by a key_id
+_ orders_signature_check(direction, key_id) method_id {
+    var (stored_seqno, n, k, public_keys, pending_orders) = load_data();
+    var l = nil;
+    var id = -1;
+    key_id = key_id - 1;
+    do {
+        (id, var fs, var f) = pending_orders.udict_get_next?(32, id);
+        if (f) {
+            var (signatures, approved_signatures, valid_until, msg) = unpack_order(fs);
+            (var fs3, var f3) = signatures.udict_get?(8, key_id);
+            if (f3 == direction) {
+                var (wc, addr, amount) = parse_msg(msg);
+                l = cons(
+                    tuple4(
+                        msg.begin_parse(),
+                        approved_signatures,
+                        pair(wc, addr),
+                        amount
+                    ), l
+                );
+            }
+        }
+    } until (~ f);
+    return l;
+}
